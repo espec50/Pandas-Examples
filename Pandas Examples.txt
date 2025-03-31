@@ -1,0 +1,223 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+
+# Set default page config
+st.set_page_config(
+    page_title="ICPW Refresh Tracker",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Load the data
+@st.cache_data
+def load_data():
+    df = pd.read_excel("Refresh Main.xlsx", sheet_name="Main")
+    df.columns = df.columns.str.strip()  # Removes any accidental blank spaces
+    return df
+
+df = load_data()
+
+# Ensure our Data Date column is in datetime form
+df['Data Date'] = pd.to_datetime(df['Data Date'], errors='coerce')
+df = df.sort_values(by='Data Date', ascending=True)
+
+# Ensure correct data types for number values
+#df['value_p5p'] = pd.to_numeric(df['value_p5p'], errors='coerce')
+#df['value_95p'] = pd.to_numeric(df['value_95p'], errors='coerce')
+#df['VM Count'] = pd.to_numeric(df['VM Count'], errors='coerce')
+#df['Node Count'] = pd.to_numeric(df['Node Count'], errors='coerce')
+
+# Side navigation bar
+st.sidebar.title("Navigation")
+selected_page = st.sidebar.radio(
+    "Select Page",
+    ["Overview Summary", "Site Summary", "Read Me"]
+)
+
+# Sidebar Filters
+st.sidebar.title("Filters")
+selected_site = st.sidebar.selectbox("Select Site", ['All'] + list(df["Site"].unique()))
+
+# Filter data
+if selected_site != 'All':
+    df_filtered = df[df["Site"] == selected_site]
+else:
+    df_filtered = df
+
+# Define your metrics calculation function
+def calculate_metrics(df_group):
+    metrics = {}
+    primary_df = df_group[df_group['Entry Type'] == 'Primary']
+    
+    # Make sure primary is not empty
+    if primary_df.empty:
+        metrics['Total Refresh Cabinet Count'] = 0
+        metrics['Total Baseline Power (kW)'] = 0
+        metrics['Baseline VM Count'] = 0
+        metrics['Baseline Node Count'] = 0
+    else:
+        metrics['Total Refresh Cabinet Count'] = primary_df.shape[0]
+        metrics['Total Baseline Power (kW)'] = primary_df['value_p5p'].sum() / 1000
+        metrics['Baseline VM Count'] = primary_df['VM Count'].sum()
+        metrics['Baseline Node Count'] = primary_df['Node Count'].sum()
+    
+    metrics['Completed Refresh Cabinet Count'] = df_group[df_group['Verum Status'] == 'Decommissioned'].shape[0] + df_group[df_group['Asset Status'] == 'Not Provisioned'].shape[0]
+    metrics['Remaining Refresh Cab Count'] = metrics['Total Refresh Cabinet Count'] - metrics['Completed Refresh Cabinet Count']
+    metrics['Current Power Consumption (kW)'] = df_group['value_95p'].sum() / 1000
+    metrics['Current Node Count'] = df_group['Node Count'].sum()
+    metrics['Current VMs'] = df_group['VM Count'].sum()
+    
+    metrics['Reclaimed Power (kW)'] = metrics['Total Baseline Power (kW)'] - metrics['Current Power Consumption (kW)']
+    metrics['Reclaimed Node Count'] = metrics['Baseline Node Count'] - metrics['Current Node Count']
+    
+    metrics['Remaining VM Count'] = metrics['Baseline VM Count'] - metrics['Current VMs']
+    metrics['Active DAT Count'] = df_group[df_group['DAT Status'].isin(['Open', 'In Progress', 'Order WF Initiated'])].shape[0]
+    
+    return pd.Series(metrics)
+
+# Group by 'Data Date' for historical tracking
+metrics_over_time = df_filtered.groupby('Data Date').apply(calculate_metrics).reset_index()
+
+# Get most recent date in the filtered data set
+latest_date = df_filtered['Data Date'].max()
+# Filter to latest date
+latest_metrics = metrics_over_time[metrics_over_time['Data Date'] == latest_date]
+
+# Make sure data exists
+if latest_metrics.empty and not metrics_over_time.empty:
+    latest_metrics = metrics_over_time.iloc[[-1]]  # Use latest date
+elif latest_metrics.empty and metrics_over_time.empty:
+    # Create empty metrics to fall back on
+    latest_metrics = pd.DataFrame({
+        'Total Refresh Cabinet Count': [0],
+        'Total Baseline Power (kW)': [0],
+        'Baseline VM Count': [0],
+        'Baseline Node Count': [0],
+        'Completed Refresh Cab Count': [0],
+        'Remaining Refresh Cab Count': [0],
+        'Current Power Consumption (kW)': [0],
+        'Total Power Recovered (kW)': [0],
+        'Reclaimed Node Count': [0],
+        'Active DAT Count': [0],
+        'Current VMs': [0],
+        'Remaining VM Count': [0],
+    })
+    st.warning("No data available for the selected filter")
+
+# Calculate baseline metrics directly from all Primary entries across all dates
+# This ensures baseline metrics are calculated from ALL Primary entries
+primary_entries = df_filtered[df_filtered['Entry Type'] == 'Primary']
+if not primary_entries.empty:
+    baseline_metrics = {
+        'Total Refresh Cabinet Count': primary_entries.shape[0],
+        'Total Baseline Power (kW)': primary_entries['value_p5p'].sum() / 1000,
+        'Baseline VM Count': primary_entries['VM Count'].sum(),
+        'Baseline Node Count': primary_entries['Node Count'].sum()
+    }
+else:
+    baseline_metrics = {
+        'Total Refresh Cabinet Count': 0,
+        'Total Baseline Power (kW)': 0,
+        'Baseline VM Count': 0,
+        'Baseline Node Count': 0
+    }
+
+# Site Summary
+if selected_page == "Site Summary":
+    st.title(f"ICPW Refresh Tracker - {selected_site if selected_site != 'All' else 'All Sites'}")
+    
+    #Baseline KPIs
+    st.subheader("Baseline Metrics")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Refresh Cabinet Count", int(baseline_metrics['Total Refresh Cabinet Count']))
+    col2.metric("Total Baseline Power (kW)", round(baseline_metrics['Total Baseline Power (kW)'], 2))
+    col3.metric("Baseline VM Count", int(baseline_metrics['Baseline VM Count']))
+    col4.metric("Baseline Node Count", int(baseline_metrics['Baseline Node Count']))
+    
+    # Current metrics
+    st.subheader("Current Metrics & Progress to Date")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Refresh Cabinet Count", metrics_over_time.iloc[-1]['Total Refresh Cabinet Count'])
+    col2.metric("Completed Refresh Count", metrics_over_time.iloc[-1]['Completed Refresh Cabinet Count'])
+    col3.metric("Remaining Cabinet Count", metrics_over_time.iloc[-1]['Remaining Refresh Cab Count'])
+    col4.metric("Current Power Consumption (kW)",round(metrics_over_time.iloc[-1]['Current Power Consumption (kW)'], 2))
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Reclaimed Power (kW)", round(metrics_over_time.iloc[-1]['Reclaimed Power (kW)'], 2))
+    col2.metric("Reclaimed Node Count", metrics_over_time.iloc[-1]['Reclaimed Node Count'])
+    col3.metric("Active DAT Count", metrics_over_time.iloc[-1]['Active DAT Count'])
+    
+    # Graphs
+    st.subheader("Progress Over Time")
+    fig = px.line(metrics_over_time, x='Data Date', y=['Total Refresh Cabinet Count', 'Completed Refresh Cabinet Count', 'Remaining Refresh Cab Count'],
+                  labels={'value':'Cabinet Count'}, title="Cabinet Refresh Progress Over Time")
+    st.plotly_chart(fig, use_container_width=True)
+    
+    fig_power = px.line(metrics_over_time, x='Data Date', y=['Reclaimed Power (kW)', 'Current Power Consumption (kW)'],
+                        labels={'value':'Power (kW)'}, title="Power Recovery & Consumption Trend")
+    st.plotly_chart(fig_power, use_container_width=True)
+    
+    # Add progress completion percentage
+    if baseline_metrics['Total Refresh Cabinet Count'] > 0:
+        completion_pct = (metrics_over_time.iloc[-1]['Completed Refresh Cabinet Count'] / 
+                          baseline_metrics['Total Refresh Cabinet Count'] * 100)
+        
+        st.subheader("Overall Progress")
+        st.progress(min(completion_pct/100, 1.0))
+        st.write(f"**{round(completion_pct, 1)}%** of cabinets have been refreshed")
+    
+    #Pivot Table
+    st.subheader("Site & Space Level Metrics Summary")
+    pivot_data = df_filtered.groupby(['Site', 'Space']).apply(calculate_metrics).reset_index()
+    st.dataframe(pivot_data.style.format(precision=2))
+
+# Overview Summary Page
+elif selected_page == "Overview Summary":
+    st.title("ICPW Global Refresh Tracker Overview")
+    
+    # Calculate global baseline metrics directly from all Primary entries
+    all_primary_entries = df[df['Entry Type'] == 'Primary']
+    if not all_primary_entries.empty:
+        global_baseline_metrics = {
+            'Total Refresh Cabinet Count': all_primary_entries.shape[0],
+            'Total Baseline Power (kW)': all_primary_entries['value_p5p'].sum() / 1000,
+            'Baseline VM Count': all_primary_entries['VM Count'].sum(),
+            'Baseline Node Count': all_primary_entries['Node Count'].sum()
+        }
+    else:
+        global_baseline_metrics = {
+            'Total Refresh Cabinet Count': 0,
+            'Total Baseline Power (kW)': 0,
+            'Baseline VM Count': 0,
+            'Baseline Node Count': 0
+        }
+    
+    # Global metrics display
+    st.subheader("Global Metrics")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Refresh Cabinets", int(global_baseline_metrics['Total Refresh Cabinet Count']))
+    col2.metric("Total Baseline Power (kW)", round(global_baseline_metrics['Total Baseline Power (kW)'], 2))
+    col3.metric("Baseline VM Count", int(global_baseline_metrics['Baseline VM Count']))
+    col4.metric("Baseline Node Count", int(global_baseline_metrics['Baseline Node Count']))
+    
+    # Global Pivot Table for All Sites & Spaces
+    st.subheader("Global Site & Space-Level Metrics Summary")
+    global_pivot_data = df.groupby(['Site', 'Space']).apply(calculate_metrics).reset_index()
+    st.dataframe(global_pivot_data.style.format(precision=2))
+
+# Read Me Page
+elif selected_page == "Read Me":
+    st.title("ICPW Refresh Tracker Read Me Documentation")
+    
+    st.subheader("Overview")
+    st.write("This dashboard provides insights into the progress of data center cabinet refresh efforts, tracking key performance indicators over time.")
+    
+    st.subheader("Pages")
+    st.markdown("**1. Site Summary:** Displays site-specific metrics and progress for selected data centers.")
+    st.markdown("**2. Overview Summary:** Provides a global summary across all data centers, aggregating refresh progress.")
+    
+    st.subheader("Metrics Explanation")
+    st.markdown("**Total Refresh Cabinet Count:** The total number of cabinets identified for refresh, derived from 'Primary' entries in the dataset.")
+    st.markdown("**Total Baseline Power (kW):** Sum of 'value_p5p' for 'Primary' cabinets, divided by 1000 for kW conversion.")
+    st.markdown("**Baseline VM Count:** Total VM count for 'Primary' cabinets, indicating the original number of virtual machines hosted.")
